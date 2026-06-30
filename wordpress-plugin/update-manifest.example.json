@@ -1,0 +1,10 @@
+{
+  "version": "1.1.1",
+  "download_url": "https://newenergyeg.com/wp-content/uploads/new-energy-mobile-api.zip",
+  "details_url": "https://newenergyeg.com",
+  "requires": "6.0",
+  "tested": "6.8",
+  "requires_php": "7.4",
+  "description": "Mobile app API and request management for New Energy.",
+  "changelog": "Update request management, admin layout, or mobile API behavior here."
+}

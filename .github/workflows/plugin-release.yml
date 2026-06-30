@@ -1,0 +1,22 @@
+name: Build WordPress Plugin
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package plugin
+        run: |
+          cd wordpress-plugin
+          zip -r new-energy-mobile-api.zip new-energy-mobile-api
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" wordpress-plugin/new-energy-mobile-api.zip --clobber

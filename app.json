@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "New Energy Service",
+    "slug": "new-energy-service",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "newenergy",
+    "backgroundColor": "#F6F7F9",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.newenergy.service"
+    },
+    "android": {
+      "package": "com.newenergy.service",
+      "edgeToEdgeEnabled": true,
+      "softwareKeyboardLayoutMode": "resize"
+    }
+  }
+}
