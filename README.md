@@ -1,146 +1,118 @@
 # New Energy Service App
 
-iOS and Android app built with Expo React Native for New Energy electric vehicle service workflows.
+Flutter mobile app for New Energy electric-vehicle service workflows. The app
+is Arabic-first and right-to-left, keeps an encrypted offline cache, and connects
+to the bundled WordPress API plugin with individual customer accounts.
+
+The former Expo client remains at the repository root as a temporary migration
+fallback. New mobile development belongs in `flutter_app/`.
 
 ## Features
 
-- Book maintenance.
-- Request a home visit.
-- Request an emergency visit.
-- Buy spare parts.
-- Buy a charger or accessory.
-- Request emergency towing.
-- Track maintenance stages, problems, and repairs.
-- View the technical report and invoice.
-- Select a payment method and mark payment as completed.
-- Send reviews through Facebook and Google Maps.
+- Book maintenance, home visits, emergency visits, spare parts, chargers, and towing.
+- Register, sign in, recover a password, and sign out with WordPress accounts.
+- Save account data in platform secure storage and synchronize automatically.
+- Track maintenance stages, reported problems, and repairs.
+- Review the technical report and itemized invoice.
+- Submit a payment method for management verification without collecting card data.
+- Send a rating to WordPress before opening Facebook or Google Maps.
+- Browse products, search categories, keep an encrypted account cart, submit a
+  native WooCommerce order, and review recent store orders without leaving the app.
 
-## Run Locally
+## Flutter Workflow
 
-Required on the development machine:
+Flutter 3.47.5 is installed at `D:\tools\flutter` on this workstation. From
+`flutter_app/`:
 
-- Node.js and npm.
-- Expo CLI through `npx`.
-- Expo Go on a real phone, or Android Studio/Xcode for simulators.
-
-Commands:
-
-```bash
-npm install
-npx expo start
+```powershell
+D:\tools\flutter\bin\flutter.bat pub get
+D:\tools\flutter\bin\flutter.bat run -d chrome --dart-define-from-file=../.env
 ```
 
-Then choose:
+Run the quality suite:
 
-- `a` to run Android.
-- `i` to run iOS on macOS with Xcode.
-- Scan the QR code with Expo Go to test on a real device.
-
-## Project Structure
-
-- `App.tsx`: app state, tab switching, and screen composition.
-- `src/api`: WordPress and WooCommerce API calls.
-- `src/components`: reusable UI, cards, modals, and maintenance timeline pieces.
-- `src/data`: static service, billing, maintenance, and starter request data.
-- `src/styles`: shared React Native styles.
-- `src/types`: app-wide TypeScript models.
-- `src/utils`: formatting and API-to-app mappers.
-
-## Development Preferences
-
-- Keep updates lean and avoid unnecessary abstractions.
-- Add comments only when they clarify non-obvious behavior.
-- Prefer small focused changes over broad rewrites.
-
-## Connect The App To WordPress
-
-The WordPress website used as the app database:
-
-```text
-https://newenergyeg.com
+```powershell
+D:\tools\flutter\bin\dart.bat format --output=none --set-exit-if-changed lib test
+D:\tools\flutter\bin\flutter.bat analyze
+D:\tools\flutter\bin\flutter.bat test
 ```
 
-A ready-to-install WordPress plugin is included at:
+Build locally without Expo or a cloud build service:
 
-```text
-wordpress-plugin/new-energy-mobile-api
+```powershell
+D:\tools\flutter\bin\flutter.bat build web --release --dart-define-from-file=../.env
+D:\tools\flutter\bin\flutter.bat build apk --release --dart-define-from-file=../.env
 ```
 
-Connection steps:
+The APK is written to
+`flutter_app/build/app/outputs/flutter-apk/app-release.apk`. iOS archives require
+macOS, Xcode, and an Apple signing identity.
 
-1. Upload `wordpress-plugin/new-energy-mobile-api-flat.zip` from the WordPress dashboard:
-   `Plugins > Add New > Upload Plugin`.
-2. Activate the `New Energy Mobile API` plugin.
-3. Open:
-   `Settings > New Energy Mobile API`.
-4. Copy the `App token` value.
-5. Create a `.env` file next to `package.json` and add:
+## Configuration
 
-```bash
+The Flutter app uses these public configuration values:
+
+```dotenv
 EXPO_PUBLIC_WORDPRESS_BASE_URL=https://newenergyeg.com
-EXPO_PUBLIC_NEWENERGY_APP_TOKEN=paste-token-here
 EXPO_PUBLIC_FACEBOOK_REVIEW_URL=https://www.facebook.com/newenergyeg
 EXPO_PUBLIC_GOOGLE_MAPS_REVIEW_URL=https://www.google.com/maps/search/?api=1&query=New%20Energy%20Egypt
+NEWENERGY_SERVICE_PHONE=01000000000
 ```
 
-After that:
+Pass the file with `--dart-define-from-file=../.env`. These values are compiled
+into the client and are public. The legacy Expo token may remain in the repository
+`.env` during migration, but Flutter ignores it. Never place WordPress administrator
+credentials, payment secrets, signing keys, or other privileged credentials here.
 
-- App service requests are saved in WordPress under `Mobile Requests`.
-- App payments update the request payment status in WordPress.
-- In-app ratings are saved to the request before opening Facebook or Google Maps.
-- WooCommerce products are shown in the app from the public store endpoint.
+## WordPress Integration
 
-## Updating Requests In WordPress
+The companion plugin is in `wordpress-plugin/new-energy-mobile-api/`. Its routes
+live under `/wp-json/newenergy/v1`:
 
-Open your WordPress dashboard:
+- Public health check: `GET /health`
+- Accounts: `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/refresh`
+- Account profile and password recovery: `GET /auth/me`, `POST /auth/forgot-password`
+- Automatic changes: `GET /sync`
+- Account-owned requests: `GET|POST /service-requests`
+- Request detail: `GET /service-requests/{id}`
+- Payment recording: `POST /service-requests/{id}/payment`
+- Reviews: `POST /service-requests/{id}/review`
+- Account-owned shop orders: `GET|POST /shop/orders`
 
-```text
-https://newenergyeg.com/wp-admin
-```
+Activating or upgrading the plugin creates its session and audit tables
+automatically. Customer routes require expiring, revocable bearer sessions;
+requests are restricted by WordPress user ownership. Payment currently submits an
+external payment method for management verification; it is not a card-processing
+gateway.
 
-Then go to:
+The native store reads published products through WooCommerce's public Store API.
+Order creation is handled by the authenticated plugin route, which checks current
+prices, purchasability, and stock on the server before creating an account-owned
+WooCommerce order. Mobile orders remain on hold until delivery and payment are
+confirmed; the app never collects card details.
 
-```text
-Mobile Requests
-```
+The app pushes local changes immediately, retries queued requests safely, refreshes
+after app resume, and checks for management updates every 45 seconds while open.
+WordPress managers can review or export redacted events from
+`Mobile Requests > Audit History`.
 
-Open any request to update:
+The web preview can be blocked by browser CORS rules even when Android and iOS
+network calls work. The app keeps its local fallback in that case.
 
-- Customer and vehicle details.
-- Maintenance status.
-- Technical report.
-- Missing items, problems, repairs, and items marked as not needed.
-- Invoice items and total.
-- Payment status and paid amount.
+## Release Notes
 
-After saving the request in WordPress, open the app and tap `Update from WordPress` on the requests screen.
+- Android application ID: `com.newenergy.service`
+- iOS bundle ID: `com.newenergy.service`
+- Version: `2.1.0+3`
+- The official wordmark is in `flutter_app/assets/newenergy_logo.png`; launcher and
+  splash assets use the `#2661e9` brand color.
+- The local APK uses Flutter's development signing fallback. Configure an Android
+  upload keystore before publishing an AAB to Google Play.
+- Replace the placeholder service phone and configure production signing before
+  store submission.
 
-If WordPress shows `Plugin file does not exist`, use the `new-energy-mobile-api-flat.zip`
-package. If the dashboard upload still fails, install it manually:
+## Legacy Expo Client
 
-1. Open your hosting file manager or FTP.
-2. Go to `wp-content/plugins/`.
-3. Create a folder named `new-energy-mobile-api`.
-4. Upload `wordpress-plugin/new-energy-mobile-api/new-energy-mobile-api.php` into that folder.
-5. In WordPress Admin, open `Plugins` and activate `New Energy Mobile API`.
-
-## Build Android And iOS
-
-Install EAS CLI or run it through `npx`:
-
-```bash
-npm install
-npx eas build --platform android --profile production
-npx eas build --platform ios --profile production
-```
-
-Build configuration files:
-
-- `app.json` for app name, package identifiers, and Expo settings.
-- `eas.json` for EAS build profiles.
-
-## Before Publishing
-
-- Replace the phone number inside `App.tsx`.
-- Replace the review links in `.env` with the real Facebook page and Google Maps place links.
-- Add the official app icon and splash screen before submitting to the stores.
+The root `App.tsx`, `src/`, `package.json`, `app.json`, and `eas.json` belong to
+the previous Expo implementation. Keep them only until Flutter parity is approved;
+do not duplicate new features across both clients unless migration work requires it.

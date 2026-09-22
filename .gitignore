@@ -4,6 +4,8 @@ node_modules/
 !.env.example
 .expo/
 .vs/
+.idea/
+tmp/
 dist/
 build/
 web-build/
