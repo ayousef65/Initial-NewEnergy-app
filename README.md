@@ -116,9 +116,3 @@ network calls work. The app keeps its local fallback in that case.
 The root `App.tsx`, `src/`, `package.json`, `app.json`, and `eas.json` belong to
 the previous Expo implementation. Keep them only until Flutter parity is approved;
 do not duplicate new features across both clients unless migration work requires it.
-
-## Codex Skill
-
-The repo-local `$mobile-app-developer` skill is stored in
-`.agents/skills/mobile-app-developer`. It captures the Flutter architecture,
-WordPress contract, Arabic RTL requirements, checks, and release boundaries.

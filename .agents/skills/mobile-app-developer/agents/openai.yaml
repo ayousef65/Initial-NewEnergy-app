@@ -1,4 +1,0 @@
-interface:
-  display_name: "Mobile App Developer"
-  short_description: "Build and package the New Energy Flutter app"
-  default_prompt: "Use $mobile-app-developer to implement and verify a feature in the New Energy Flutter app."
