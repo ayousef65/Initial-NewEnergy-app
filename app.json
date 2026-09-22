@@ -16,8 +16,15 @@
     },
     "android": {
       "package": "com.newenergy.service",
-      "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "resize"
+    },
+    "plugins": [
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "67971c10-9af6-4092-af1d-3c7571535a13"
+      }
     }
   }
 }

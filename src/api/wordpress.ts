@@ -64,11 +64,11 @@ export type WordpressProduct = {
     currency_symbol?: string;
     currency_minor_unit?: number;
   };
-  categories?: Array<{
+  categories?: {
     id: number;
     name: string;
     slug: string;
-  }>;
+  }[];
 };
 
 type WordpressPaymentPayload = {

@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: New Energy Mobile API
- * Description: Connects the New Energy mobile app to WordPress with service requests, maintenance updates, invoices, payments, and reviews.
- * Version: 1.1.1
+ * Description: Connects the New Energy mobile app to WordPress and WooCommerce with service requests, maintenance, invoices, shop orders, payments, and reviews.
+ * Version: 2.1.0
  * Author: New Energy
  * Update URI: https://newenergyeg.com/new-energy-mobile-api
  */
@@ -13,21 +13,35 @@ if (!defined('ABSPATH')) {
 
 const NEM_API_NAMESPACE = 'newenergy/v1';
 const NEM_REQUEST_CPT = 'ne_service_request';
-const NEM_TOKEN_OPTION = 'nem_mobile_api_token';
-const NEM_PLUGIN_VERSION = '1.1.1';
+const NEM_PLUGIN_VERSION = '2.1.0';
 const NEM_UPDATE_OPTION = 'nem_mobile_update_manifest_url';
 const NEM_GITHUB_REPO_OPTION = 'nem_mobile_github_repo';
 const NEM_GITHUB_ASSET_OPTION = 'nem_mobile_github_asset';
+const NEM_DATABASE_VERSION = '2.0.0';
+const NEM_DATABASE_VERSION_OPTION = 'nem_mobile_database_version';
+const NEM_SESSION_TTL = 2592000;
+const NEM_AUDIT_RETENTION_DAYS = 180;
+const NEM_CLEANUP_HOOK = 'nem_mobile_cleanup_security_data';
+
+require_once __DIR__ . '/includes/database.php';
+require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/shop.php';
+require_once __DIR__ . '/includes/audit-admin.php';
 
 register_activation_hook(__FILE__, 'nem_activate_plugin');
 register_deactivation_hook(__FILE__, 'nem_deactivate_plugin');
 
 add_action('init', 'nem_register_request_post_type');
 add_action('init', 'nem_register_request_meta');
+add_action('plugins_loaded', 'nem_maybe_upgrade_database');
 add_action('rest_api_init', 'nem_register_rest_routes');
 add_action('admin_menu', 'nem_register_admin_page');
+add_action('admin_menu', 'nem_register_audit_admin_page');
+add_action('admin_post_nem_export_audit', 'nem_export_audit_csv');
 add_action('add_meta_boxes', 'nem_register_request_metaboxes');
 add_action('save_post_' . NEM_REQUEST_CPT, 'nem_save_request_meta');
+add_action('after_password_reset', 'nem_revoke_user_sessions');
+add_action(NEM_CLEANUP_HOOK, 'nem_cleanup_security_data');
 add_filter('manage_ne_service_request_posts_columns', 'nem_request_columns');
 add_action('manage_ne_service_request_posts_custom_column', 'nem_request_column_values', 10, 2);
 add_filter('site_transient_update_plugins', 'nem_check_for_plugin_update');
@@ -35,16 +49,15 @@ add_filter('plugins_api', 'nem_plugin_update_info', 10, 3);
 
 function nem_activate_plugin(): void
 {
-    if (!get_option(NEM_TOKEN_OPTION)) {
-        add_option(NEM_TOKEN_OPTION, wp_generate_password(48, false, false));
-    }
-
+    nem_install_database();
+    nem_schedule_cleanup();
     nem_register_request_post_type();
     flush_rewrite_rules();
 }
 
 function nem_deactivate_plugin(): void
 {
+    nem_unschedule_cleanup();
     flush_rewrite_rules();
 }
 
@@ -63,9 +76,9 @@ function nem_register_request_post_type(): void
             'public' => false,
             'show_ui' => true,
             'show_in_menu' => true,
-            'show_in_rest' => true,
+            'show_in_rest' => false,
             'menu_icon' => 'dashicons-car',
-            'supports' => ['title'],
+            'supports' => ['title', 'author'],
             'capability_type' => 'post',
         ]
     );
@@ -94,6 +107,7 @@ function nem_register_request_meta(): void
         'paid_amount',
         'rating',
         'review_message',
+        'client_mutation_id',
     ];
 
     foreach ($fields as $field) {
@@ -103,10 +117,7 @@ function nem_register_request_meta(): void
             [
                 'single' => true,
                 'type' => 'string',
-                'show_in_rest' => true,
-                'auth_callback' => static function () {
-                    return current_user_can('edit_posts');
-                },
+                'show_in_rest' => false,
             ]
         );
     }
@@ -114,6 +125,9 @@ function nem_register_request_meta(): void
 
 function nem_register_rest_routes(): void
 {
+    nem_register_auth_routes();
+    nem_register_shop_routes();
+
     register_rest_route(
         NEM_API_NAMESPACE,
         '/health',
@@ -130,14 +144,24 @@ function nem_register_rest_routes(): void
         [
             [
                 'methods' => WP_REST_Server::CREATABLE,
-                'permission_callback' => 'nem_rest_permission',
+                'permission_callback' => 'nem_rest_authenticated_permission',
                 'callback' => 'nem_rest_create_request',
             ],
             [
                 'methods' => WP_REST_Server::READABLE,
-                'permission_callback' => 'nem_rest_permission',
+                'permission_callback' => 'nem_rest_authenticated_permission',
                 'callback' => 'nem_rest_list_requests',
             ],
+        ]
+    );
+
+    register_rest_route(
+        NEM_API_NAMESPACE,
+        '/sync',
+        [
+            'methods' => WP_REST_Server::READABLE,
+            'permission_callback' => 'nem_rest_authenticated_permission',
+            'callback' => 'nem_rest_sync_requests',
         ]
     );
 
@@ -146,7 +170,7 @@ function nem_register_rest_routes(): void
         '/service-requests/(?P<id>\d+)',
         [
             'methods' => WP_REST_Server::READABLE,
-            'permission_callback' => 'nem_rest_permission',
+            'permission_callback' => 'nem_rest_authenticated_permission',
             'callback' => 'nem_rest_get_request',
             'args' => [
                 'id' => [
@@ -161,7 +185,7 @@ function nem_register_rest_routes(): void
         '/service-requests/(?P<id>\d+)/payment',
         [
             'methods' => WP_REST_Server::CREATABLE,
-            'permission_callback' => 'nem_rest_permission',
+            'permission_callback' => 'nem_rest_authenticated_permission',
             'callback' => 'nem_rest_record_payment',
             'args' => [
                 'id' => [
@@ -176,7 +200,7 @@ function nem_register_rest_routes(): void
         '/service-requests/(?P<id>\d+)/review',
         [
             'methods' => WP_REST_Server::CREATABLE,
-            'permission_callback' => 'nem_rest_permission',
+            'permission_callback' => 'nem_rest_authenticated_permission',
             'callback' => 'nem_rest_record_review',
             'args' => [
                 'id' => [
@@ -187,26 +211,6 @@ function nem_register_rest_routes(): void
     );
 }
 
-function nem_rest_permission(WP_REST_Request $request)
-{
-    $configured_token = (string) get_option(NEM_TOKEN_OPTION);
-    $provided_token = (string) $request->get_header('x-newenergy-app-token');
-
-    if (!$provided_token) {
-        $provided_token = (string) $request->get_param('app_token');
-    }
-
-    if (!$configured_token || !$provided_token || !hash_equals($configured_token, $provided_token)) {
-        return new WP_Error(
-            'nem_invalid_token',
-            'Invalid New Energy app token.',
-            ['status' => 401]
-        );
-    }
-
-    return true;
-}
-
 function nem_rest_health(): WP_REST_Response
 {
     return rest_ensure_response(
@@ -214,6 +218,8 @@ function nem_rest_health(): WP_REST_Response
             'ok' => true,
             'site' => home_url(),
             'namespace' => NEM_API_NAMESPACE,
+            'authentication' => 'opaque-bearer-session',
+            'apiVersion' => NEM_PLUGIN_VERSION,
         ]
     );
 }
@@ -225,16 +231,49 @@ function nem_rest_create_request(WP_REST_Request $request)
         $params = [];
     }
 
-    $phone = nem_get_param($params, 'phone');
+    $user = wp_get_current_user();
+    $user_id = (int) $user->ID;
+    $phone = nem_normalize_phone((string) get_user_meta($user_id, 'nem_mobile_phone', true));
+    if ($phone === '') {
+        $phone = nem_normalize_phone((string) ($params['phone'] ?? ''));
+        if (nem_phone_is_valid($phone)) {
+            update_user_meta($user_id, 'nem_mobile_phone', $phone);
+            update_user_meta($user_id, 'billing_phone', $phone);
+        }
+    }
     $location = nem_get_param($params, 'location');
     $service_title = nem_get_param($params, 'service_title');
+    $service_id = nem_get_param($params, 'service_id');
+    $client_mutation_id = sanitize_text_field((string) ($params['client_mutation_id'] ?? ''));
 
-    if (!$phone || !$location) {
+    if (!nem_phone_is_valid($phone) || !$location || !$service_title) {
         return new WP_Error(
             'nem_missing_required_fields',
-            'Phone and location are required.',
+            'A valid account phone, service, and location are required.',
             ['status' => 400]
         );
+    }
+
+    if ($client_mutation_id !== '' && !preg_match('/^[A-Za-z0-9_-]{8,100}$/', $client_mutation_id)) {
+        return new WP_Error('nem_invalid_mutation_id', 'The request retry key is invalid.', ['status' => 400]);
+    }
+
+    if ($client_mutation_id !== '') {
+        $existing = get_posts(
+            [
+                'post_type' => NEM_REQUEST_CPT,
+                'post_status' => 'any',
+                'author' => $user_id,
+                'posts_per_page' => 1,
+                'fields' => 'ids',
+                'meta_key' => 'client_mutation_id',
+                'meta_value' => $client_mutation_id,
+                'no_found_rows' => true,
+            ]
+        );
+        if ($existing) {
+            return rest_ensure_response(nem_serialize_request((int) $existing[0]));
+        }
     }
 
     $post_id = wp_insert_post(
@@ -242,7 +281,8 @@ function nem_rest_create_request(WP_REST_Request $request)
             'post_type' => NEM_REQUEST_CPT,
             'post_status' => 'publish',
             'post_title' => sprintf('%s - %s', $service_title ?: 'Mobile request', $phone),
-            'post_content' => nem_get_param($params, 'notes'),
+            'post_content' => sanitize_textarea_field((string) ($params['notes'] ?? '')),
+            'post_author' => $user_id,
         ],
         true
     );
@@ -254,16 +294,16 @@ function nem_rest_create_request(WP_REST_Request $request)
     $request_number = 'NE-' . $post_id;
     $meta = [
         'request_number' => $request_number,
-        'service_id' => nem_get_param($params, 'service_id'),
+        'service_id' => $service_id,
         'service_title' => $service_title,
-        'status' => nem_get_param($params, 'status') ?: 'registered',
+        'status' => in_array($service_id, ['tow', 'emergency-visit'], true) ? 'dispatching' : 'registered',
         'priority' => nem_get_param($params, 'priority'),
-        'customer_name' => nem_get_param($params, 'customer_name'),
+        'customer_name' => $user->display_name ?: nem_get_param($params, 'customer_name'),
         'phone' => $phone,
         'vehicle' => nem_get_param($params, 'vehicle'),
         'location' => $location,
         'preferred_date' => nem_get_param($params, 'preferred_date'),
-        'notes' => nem_get_param($params, 'notes'),
+        'notes' => sanitize_textarea_field((string) ($params['notes'] ?? '')),
         'report_text' => '',
         'repair_items' => wp_json_encode([]),
         'invoice_items' => wp_json_encode([]),
@@ -273,35 +313,36 @@ function nem_rest_create_request(WP_REST_Request $request)
         'paid_amount' => '0',
         'rating' => '0',
         'review_message' => '',
+        'client_mutation_id' => $client_mutation_id,
     ];
 
     foreach ($meta as $key => $value) {
         update_post_meta($post_id, $key, $value);
     }
 
+    nem_audit_log(
+        'request.created',
+        'service_request',
+        (int) $post_id,
+        ['service_id' => $service_id, 'priority' => $meta['priority']]
+    );
     return new WP_REST_Response(nem_serialize_request($post_id), 201);
 }
 
 function nem_rest_list_requests(WP_REST_Request $request): WP_REST_Response
 {
-    $phone = sanitize_text_field((string) $request->get_param('phone'));
-
+    $management_scope = nem_request_uses_management_scope($request);
     $args = [
         'post_type' => NEM_REQUEST_CPT,
         'post_status' => 'publish',
-        'posts_per_page' => 30,
+        'posts_per_page' => $management_scope ? 100 : -1,
         'orderby' => 'date',
         'order' => 'DESC',
+        'no_found_rows' => true,
     ];
 
-    if ($phone) {
-        $args['meta_query'] = [
-            [
-                'key' => 'phone',
-                'value' => $phone,
-                'compare' => '=',
-            ],
-        ];
+    if (!$management_scope) {
+        $args['author'] = get_current_user_id();
     }
 
     $query = new WP_Query($args);
@@ -311,17 +352,93 @@ function nem_rest_list_requests(WP_REST_Request $request): WP_REST_Response
         $items[] = nem_serialize_request((int) $post->ID);
     }
 
+    nem_audit_log('request.history_viewed', 'service_request', null, ['item_count' => count($items)]);
     return rest_ensure_response($items);
+}
+
+function nem_rest_sync_requests(WP_REST_Request $request): WP_REST_Response
+{
+    $management_scope = nem_request_uses_management_scope($request);
+    $cursor_timestamp = time();
+    $args = [
+        'post_type' => NEM_REQUEST_CPT,
+        'post_status' => 'publish',
+        'posts_per_page' => $management_scope ? 100 : -1,
+        'orderby' => 'modified',
+        'order' => 'DESC',
+        'no_found_rows' => true,
+    ];
+
+    if (!$management_scope) {
+        $args['author'] = get_current_user_id();
+    }
+
+    $since = sanitize_text_field((string) $request->get_param('since'));
+    $since_timestamp = $since !== '' ? strtotime($since) : false;
+    $date_window = [
+        'column' => 'post_modified_gmt',
+        'before' => gmdate('Y-m-d H:i:s', $cursor_timestamp),
+        'inclusive' => true,
+    ];
+    if ($since_timestamp !== false) {
+        $date_window = array_merge(
+            $date_window,
+            [
+                'column' => 'post_modified_gmt',
+                'after' => gmdate('Y-m-d H:i:s', $since_timestamp),
+                // Re-reading the cursor second prevents same-second updates from
+                // falling between two polling requests. Client merging is idempotent.
+                'inclusive' => true,
+            ]
+        );
+    }
+    $args['date_query'] = [$date_window];
+
+    $query = new WP_Query($args);
+    $items = [];
+    foreach ($query->posts as $post) {
+        $items[] = nem_serialize_request((int) $post->ID);
+    }
+
+    $reason = sanitize_key((string) $request->get_param('reason'));
+    if ($items || $reason === 'manual') {
+        nem_audit_log(
+            'request.synced',
+            'service_request',
+            null,
+            ['item_count' => count($items), 'reason' => $reason ?: 'automatic']
+        );
+    }
+
+    return rest_ensure_response(
+        [
+            'items' => $items,
+            'cursor' => gmdate('c', $cursor_timestamp),
+        ]
+    );
+}
+
+function nem_request_uses_management_scope(WP_REST_Request $request): bool
+{
+    return sanitize_key((string) $request->get_param('scope')) === 'all'
+        && nem_is_request_manager();
+}
+
+function nem_is_request_manager(): bool
+{
+    $allowed = current_user_can('manage_options') || current_user_can('manage_woocommerce');
+    return (bool) apply_filters('nem_mobile_user_can_manage_requests', $allowed, get_current_user_id());
 }
 
 function nem_rest_get_request(WP_REST_Request $request)
 {
     $post_id = (int) $request['id'];
 
-    if (get_post_type($post_id) !== NEM_REQUEST_CPT) {
+    if (!nem_can_access_request($post_id)) {
         return new WP_Error('nem_not_found', 'Service request not found.', ['status' => 404]);
     }
 
+    nem_audit_log('request.viewed', 'service_request', $post_id);
     return rest_ensure_response(nem_serialize_request($post_id));
 }
 
@@ -329,7 +446,7 @@ function nem_rest_record_payment(WP_REST_Request $request)
 {
     $post_id = (int) $request['id'];
 
-    if (get_post_type($post_id) !== NEM_REQUEST_CPT) {
+    if (!nem_can_access_request($post_id)) {
         return new WP_Error('nem_not_found', 'Service request not found.', ['status' => 404]);
     }
 
@@ -338,14 +455,39 @@ function nem_rest_record_payment(WP_REST_Request $request)
         $params = [];
     }
 
-    $status = nem_get_param($params, 'status') ?: 'paid';
     $method = nem_get_param($params, 'payment_method');
-    $amount = (float) nem_get_param($params, 'amount');
+    $allowed_methods = ['card', 'wallet', 'transfer', 'cash'];
+    if (!in_array($method, $allowed_methods, true)) {
+        return new WP_Error('nem_invalid_payment_method', 'The payment method is invalid.', ['status' => 400]);
+    }
+
+    $is_manager = nem_is_request_manager();
+    $requested_status = sanitize_key(nem_get_param($params, 'status'));
+    $manager_statuses = ['submitted', 'paid', 'failed', 'refunded'];
+    $status = $is_manager && in_array($requested_status, $manager_statuses, true)
+        ? $requested_status
+        : 'submitted';
+    $invoice_total = max(0, (float) get_post_meta($post_id, 'invoice_total', true));
+    if (!$is_manager && $invoice_total <= 0) {
+        return new WP_Error(
+            'nem_invoice_not_ready',
+            'The invoice must be issued before payment can be submitted.',
+            ['status' => 409]
+        );
+    }
+    $amount = $is_manager
+        ? max(0, min(10000000, (float) nem_get_param($params, 'amount')))
+        : $invoice_total;
+    if ($is_manager && $amount <= 0) {
+        $amount = $invoice_total;
+    }
 
     update_post_meta($post_id, 'payment_status', $status);
     update_post_meta($post_id, 'payment_method', $method);
     update_post_meta($post_id, 'paid_amount', (string) $amount);
-    update_post_meta($post_id, 'status', $status === 'paid' ? 'paid' : get_post_meta($post_id, 'status', true));
+    if ($is_manager && $status === 'paid') {
+        update_post_meta($post_id, 'status', 'paid');
+    }
 
     add_post_meta(
         $post_id,
@@ -360,6 +502,13 @@ function nem_rest_record_payment(WP_REST_Request $request)
         )
     );
 
+    nem_touch_request($post_id);
+    nem_audit_log(
+        $is_manager ? 'payment.updated' : 'payment.submitted',
+        'service_request',
+        $post_id,
+        ['method' => $method, 'amount' => $amount, 'payment_status' => $status]
+    );
     return rest_ensure_response(nem_serialize_request($post_id));
 }
 
@@ -367,7 +516,7 @@ function nem_rest_record_review(WP_REST_Request $request)
 {
     $post_id = (int) $request['id'];
 
-    if (get_post_type($post_id) !== NEM_REQUEST_CPT) {
+    if (!nem_can_access_request($post_id)) {
         return new WP_Error('nem_not_found', 'Service request not found.', ['status' => 404]);
     }
 
@@ -382,7 +531,27 @@ function nem_rest_record_review(WP_REST_Request $request)
     update_post_meta($post_id, 'rating', (string) $rating);
     update_post_meta($post_id, 'review_message', $message);
 
+    nem_touch_request($post_id);
+    nem_audit_log('review.submitted', 'service_request', $post_id, ['rating' => $rating]);
     return rest_ensure_response(nem_serialize_request($post_id));
+}
+
+function nem_can_access_request(int $post_id): bool
+{
+    if (get_post_type($post_id) !== NEM_REQUEST_CPT) {
+        return false;
+    }
+
+    if (nem_is_request_manager()) {
+        return true;
+    }
+
+    return (int) get_post_field('post_author', $post_id) === get_current_user_id();
+}
+
+function nem_touch_request(int $post_id): void
+{
+    wp_update_post(['ID' => $post_id]);
 }
 
 function nem_get_param(array $params, string $key): string
@@ -423,6 +592,7 @@ function nem_serialize_request(int $post_id): array
         'paymentMethod' => (string) get_post_meta($post_id, 'payment_method', true),
         'paidAmount' => (float) get_post_meta($post_id, 'paid_amount', true),
         'rating' => (int) get_post_meta($post_id, 'rating', true),
+        'clientMutationId' => (string) get_post_meta($post_id, 'client_mutation_id', true),
         'createdAt' => get_post_time('c', true, $post_id),
         'updatedAt' => get_post_modified_time('c', true, $post_id),
     ];
@@ -445,11 +615,6 @@ function nem_render_admin_page(): void
         return;
     }
 
-    if (isset($_POST['nem_rotate_token']) && check_admin_referer('nem_rotate_token_action')) {
-        update_option(NEM_TOKEN_OPTION, wp_generate_password(48, false, false));
-        echo '<div class="notice notice-success"><p>New token generated.</p></div>';
-    }
-
     if (isset($_POST['nem_save_update_settings']) && check_admin_referer('nem_update_settings_action')) {
         update_option(NEM_UPDATE_OPTION, esc_url_raw((string) ($_POST['nem_update_manifest_url'] ?? '')));
         update_option(NEM_GITHUB_REPO_OPTION, sanitize_text_field((string) ($_POST['nem_github_repo'] ?? '')));
@@ -458,7 +623,6 @@ function nem_render_admin_page(): void
         echo '<div class="notice notice-success"><p>Update settings saved.</p></div>';
     }
 
-    $token = (string) get_option(NEM_TOKEN_OPTION);
     $base = esc_url_raw(rest_url(NEM_API_NAMESPACE));
     $manifest_url = (string) get_option(NEM_UPDATE_OPTION);
     $github_repo = (string) get_option(NEM_GITHUB_REPO_OPTION);
@@ -466,19 +630,17 @@ function nem_render_admin_page(): void
 
     echo '<div class="wrap">';
     echo '<h1>New Energy Mobile API</h1>';
-    echo '<p>Use this screen to connect the Expo mobile app with this WordPress website.</p>';
+    echo '<p>The Flutter app uses individual WordPress accounts, revocable sessions, account-owned service history, and native WooCommerce orders.</p>';
     echo '<table class="widefat striped" style="max-width: 900px;">';
     echo '<tbody>';
     echo '<tr><th scope="row">REST base URL</th><td><code>' . esc_html($base) . '</code></td></tr>';
     echo '<tr><th scope="row">Installed version</th><td><code>' . esc_html(NEM_PLUGIN_VERSION) . '</code></td></tr>';
-    echo '<tr><th scope="row">App token</th><td><code style="word-break: break-all;">' . esc_html($token) . '</code></td></tr>';
-    echo '<tr><th scope="row">Mobile env key</th><td><code>EXPO_PUBLIC_NEWENERGY_APP_TOKEN</code></td></tr>';
+    echo '<tr><th scope="row">Authentication</th><td>Secure bearer sessions (30 days, maximum 5 devices per account)</td></tr>';
+    echo '<tr><th scope="row">Mobile shop</th><td>WooCommerce products and account-owned orders with server-validated totals</td></tr>';
+    echo '<tr><th scope="row">Audit retention</th><td>' . esc_html((string) NEM_AUDIT_RETENTION_DAYS) . ' days</td></tr>';
     echo '</tbody>';
     echo '</table>';
-    echo '<form method="post" style="margin-top: 16px;">';
-    wp_nonce_field('nem_rotate_token_action');
-    submit_button('Generate New Token', 'secondary', 'nem_rotate_token');
-    echo '</form>';
+    echo '<p><a class="button button-secondary" href="' . esc_url(admin_url('edit.php?post_type=' . NEM_REQUEST_CPT . '&page=new-energy-mobile-audit')) . '">Open Audit History</a></p>';
     echo '<h2>Plugin Updates</h2>';
     echo '<p>Use a GitHub public repository release asset, or paste a public update manifest URL.</p>';
     echo '<form method="post" style="max-width: 900px;">';
@@ -661,10 +823,10 @@ function nem_render_request_details_metabox(WP_Post $post): void
 
     echo '<style>
         .nem-app{background:#f6f7f9;border:1px solid #e2e6ea;border-radius:8px;padding:16px}
-        .nem-hero{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;background:#15232d;color:#fff;border-radius:8px;padding:16px;margin-bottom:14px}
+        .nem-hero{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;background:#2661e9;color:#fff;border-radius:8px;padding:16px;margin-bottom:14px}
         .nem-hero h2{color:#fff;margin:6px 0 4px}
         .nem-hero p{margin:0;color:#c9d3da}
-        .nem-badge{display:inline-block;border-radius:8px;padding:6px 10px;background:#e0f3ef;color:#157a6e;font-weight:700}
+        .nem-badge{display:inline-block;border-radius:8px;padding:6px 10px;background:#e9efff;color:#2661e9;font-weight:700}
         .nem-hero .nem-badge{background:#fff;color:#15232d}
         .nem-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
         .nem-card{background:#fff;border:1px solid #e2e6ea;border-radius:8px;padding:16px;margin-top:14px}
@@ -819,6 +981,17 @@ function nem_save_request_meta(int $post_id): void
 
     update_post_meta($post_id, 'invoice_items', wp_json_encode($items));
     update_post_meta($post_id, 'invoice_total', (string) $total);
+    nem_audit_log(
+        'request.admin_updated',
+        'service_request',
+        $post_id,
+        [
+            'maintenance_status' => sanitize_key((string) ($meta['status'] ?? '')),
+            'payment_status' => sanitize_key((string) ($meta['payment_status'] ?? '')),
+            'invoice_item_count' => count($items),
+            'repair_item_count' => count($repair_items),
+        ]
+    );
 }
 
 function nem_admin_input(int $post_id, string $key, string $label, bool $readonly = false): void
@@ -862,6 +1035,7 @@ function nem_status_options(): array
 {
     return [
         'registered' => 'Registered',
+        'dispatching' => 'Dispatching Team',
         'inspection' => 'Inspection',
         'issues_found' => 'Issues Found',
         'repairing' => 'Repairing',
@@ -876,6 +1050,7 @@ function nem_payment_status_options(): array
 {
     return [
         'pending' => 'Pending',
+        'submitted' => 'Submitted for Verification',
         'paid' => 'Paid',
         'failed' => 'Failed',
         'refunded' => 'Refunded',
